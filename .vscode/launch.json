@@ -1,0 +1,12 @@
+{
+  "configurations": [
+    {
+      "name": "Launch",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceRoot}/target/debug/paint-game",
+      // "args": ["RUST_LOG","debug"], // not sure why this doesnt work. also tried ["RUST_LOG=debug"] 
+      "cwd": "${workspaceRoot}",
+  }
+  ]
+}
