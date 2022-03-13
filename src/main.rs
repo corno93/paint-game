@@ -12,7 +12,13 @@ use warp::ws::{Message, WebSocket};
 use warp::Filter;
 use log::{info, error, debug};
 use serde::{Deserialize, Serialize};
+extern crate redis;
+use redis::{Commands, from_redis_value};
+use redis::RedisResult;
+use redis::streams::{StreamReadReply, StreamReadOptions, StreamKey, StreamId};
 
+use std::env;
+use std::fmt::Debug;
 
 /// Our global unique user id counter.
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -29,10 +35,52 @@ struct MouseEvent{
     y: u16,
 }
 
+const STREAM_NAME: &str = "paint-game";
+
+fn connect() -> redis::Connection {
+    //format - host:port
+    // let redis_host_name =
+    //     env::var("REDIS_HOSTNAME").expect("missing environment variable REDIS_HOSTNAME");
+
+    let redis_password = env::var("REDIS_PASSWORD").unwrap_or_default();
+    //if Redis server needs secure connection
+    let uri_scheme = match env::var("IS_TLS") {
+        Ok(_) => "rediss",
+        Err(_) => "redis",
+    };
+    let redis_conn_url = format!("{}://:{}@localhost:6379", uri_scheme, redis_password);
+    redis::Client::open(redis_conn_url)
+        .expect("Invalid connection URL")
+        .get_connection()
+        .expect("failed to connect to Redis")
+}
+
+fn write_to_stream(data: MouseEvent, user_id: u16){
+    let mut conn = connect();
+    let _: RedisResult<String> = conn.xadd(STREAM_NAME, "*", &[("x", data.x), ("y", data.y), ("user_id", user_id)]);
+}
+
+// Here we block the stream and only read new values
+// cmd: XREAD BLOCK 0 STREAMS paint-game $
+fn blocking_read_from_stream(mut conn: redis::Connection) ->StreamReadReply{
+    let reply: StreamReadReply = conn.xread_options(&[STREAM_NAME],
+                                                    &["$"],
+                                                    &StreamReadOptions::default()
+                                                        .noack()
+                                                        .block(0)).unwrap();
+    reply
+}
+
+// Here we read the entire stream
+// cmd: XREAD STREAMS paint-game 0
+fn read_entire_stream(mut conn: redis::Connection)->StreamReadReply{
+    let reply: StreamReadReply = conn.xread(&[STREAM_NAME], &[0]).unwrap();
+    reply
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
-
 
     // Keep track of all connected users, key is usize, value
     // is a websocket sender.
@@ -57,79 +105,117 @@ async fn main() {
 }
 
 async fn user_connected(ws: WebSocket, users: Users) {
-    // Use a counter to assign a new unique ID for this user.
-    let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
 
+    let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
     info!("new user: {}", my_id);
 
-    // Split the socket into a sender and receive of messages.
     let (mut user_ws_tx, mut user_ws_rx) = ws.split();
 
-    // Use an unbounded channel to handle buffering and flushing of messages
-    // to the websocket...
-    let (tx, rx) = mpsc::unbounded_channel();
-    let mut rx = UnboundedReceiverStream::new(rx);
+    // if your a new user, send back the entire stream
+    let mut conn = connect();
+    let data = read_entire_stream(conn);
+    let h = 5;
 
-    // spawn tokio task (green thread) that gets data from the user_message function
-    // and sends back to the socket
-    // Could we instead just store the user_ws_tx in Users and write to that in user_message?
-    tokio::task::spawn(async move {
-        while let Some(message) = rx.next().await {
+    for StreamKey { key, ids } in data.keys {
+        for StreamId { id, map: zz } in ids {
+
+            let r_x: RedisResult<String> = from_redis_value(&zz.get("x").unwrap());
+            let x = r_x.unwrap();
+            let r_y: RedisResult<String> = from_redis_value(&zz.get("y").unwrap());
+            let y = r_y.unwrap();
+            let r_user_id: RedisResult<String> = from_redis_value(&zz.get("user_id").unwrap());
+            let user_id_from_stream = r_user_id.unwrap();
+
+
+            let yy = user_id_from_stream.parse::<u16>().unwrap();
+
+            debug!("INITIAL READING: My user {:?}. Stream user {:?}, x {:?}, y {:?}", my_id, user_id_from_stream, x, y);
+
+            let response = format!("{{\"x\": {}, \"y\": {}}}", x, y);
             user_ws_tx
-                .send(message)
+                .send(Message::text(response))
                 .unwrap_or_else(|e| {
                     error!("websocket send error: {}", e);
-                })
-                .await;
+                }).await;
+        }
+
+        // TODO: do we need to acknowledge each stream and message ID
+        //       once all messages are correctly processed
+
+    }
+
+
+    // everytime we hear data from redis that is not ours, send back to user_ws_tx
+    tokio::task::spawn(async move {
+        loop {
+            let mut conn = connect();
+            let data = blocking_read_from_stream(conn);
+
+            for StreamKey { key, ids } in data.keys {
+                for StreamId { id, map: zz } in ids {
+
+                    let r_x: RedisResult<String> = from_redis_value(&zz.get("x").unwrap());
+                    let x = r_x.unwrap();
+                    let r_y: RedisResult<String> = from_redis_value(&zz.get("y").unwrap());
+                    let y = r_y.unwrap();
+                    let r_user_id: RedisResult<String> = from_redis_value(&zz.get("user_id").unwrap());
+                    let user_id_from_stream = r_user_id.unwrap();
+
+
+                    let yy = user_id_from_stream.parse::<u16>().unwrap();
+
+                    debug!("READING FROM STREAM: My user {:?}. Stream user {:?}, x {:?}, y {:?}", my_id, user_id_from_stream, x, y);
+
+                    // only send back other user's data
+                    if yy != my_id as u16{
+                        let response = format!("{{\"x\": {}, \"y\": {}}}", x, y);
+                        user_ws_tx
+                        .send(Message::text(response))
+                        .unwrap_or_else(|e| {
+                            error!("websocket send error: {}", e);
+                        }).await;
+                    }
+
+
+                }
+
+                // TODO: do we need to acknowledge each stream and message ID
+                //       once all messages are correctly processed
+
+            }
+
+
         }
     });
 
-    // Save the sender in our list of connected users.
-    users.write().await.insert(my_id, tx);
-
-    // Return a `Future` that is basically a state machine managing
-    // this specific user's connection.
-
-    // Every time the user sends a message, broadcast it to
-    // all other users...
+    // everytime we receive data lets append it to our redis stream
     while let Some(result) = user_ws_rx.next().await {
-        let msg = match result {
-            Ok(msg) => msg,
-            Err(e) => {
-                error!("websocket error(uid={}): {}", my_id, e);
-                break;
-            }
-        };
-        user_message(my_id, msg, &users).await;
-    }
+            let msg = match result {
+                Ok(msg) => {
+                    msg
+                },
+                Err(e) => {
+                    error!("websocket error(uid={}): {}", my_id, e);
+                    break;
+                }
+            };
+            let msg = if let Ok(s) = msg.to_str() {
+                s
+            } else {
+                return;
+            };
 
-    // user_ws_rx stream will keep processing as long as the user stays
-    // connected. Once they disconnect, then...
-    user_disconnected(my_id, &users).await;
-}
+            // we dont actually use mouse_event but this acts as a validation step
+            let mouse_event: MouseEvent = serde_json::from_str(msg).unwrap();
+            debug!("WRITING: User {:?} Mouse event {:?}", my_id, mouse_event);
 
-async fn user_message(my_id: usize, msg: Message, users: &Users) {
-    // Skip any non-Text messages...
-    let msg = if let Ok(s) = msg.to_str() {
-        s
-    } else {
-        return;
-    };
-
-    // we dont actually use mouse_event but this acts as a validation step
-    let mouse_event: MouseEvent = serde_json::from_str(msg).unwrap();
-    debug!("{:?}", mouse_event);
-
-    // New message from this user, send it to everyone else (except same uid)...
-    for (&uid, tx) in users.read().await.iter() {
-        if my_id != uid {
-            if let Err(_disconnected) = tx.send(Message::text(msg.clone())) {
-                // The tx is disconnected, our `user_disconnected` code
-                // should be happening in another task, nothing more to
-                // do here.
-            }
+            // save to the redis stream
+            write_to_stream(mouse_event, my_id as u16);
         }
-    }
+
+    // if the user ever disconnects, the above while let will break, thus executing
+    // this code below
+    user_disconnected(my_id, &users).await;
 }
 
 async fn user_disconnected(my_id: usize, users: &Users) {
