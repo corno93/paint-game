@@ -20,6 +20,12 @@
         "group": {
           "kind": "build",
           "isDefault": true
+        },
+        "options": {
+          "env": {
+            "RUST_LOG": "DEBUG",
+            "RUST_BACKTRACE": "1"
+          }
         }
        }]
   }
