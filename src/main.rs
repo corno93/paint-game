@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
-use futures_util::stream::SplitSink;
+use futures_util::stream::{SplitSink, SplitStream};
 use log::{debug, error, info};
 use redis::{AsyncCommands, from_redis_value};
 use redis::aio;
@@ -17,6 +17,7 @@ use redis::RedisResult;
 use redis::streams::{StreamId, StreamKey, StreamReadOptions, StreamReadReply};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 use warp::Filter;
@@ -29,13 +30,8 @@ static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 ///
 /// - Key is their id
 /// - Value is a sender of `warp::ws::Message`
-type Users = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
+type Users = Arc<RwLock<HashMap<u128, mpsc::UnboundedSender<Message>>>>;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-struct MouseEvent {
-    x: u16,
-    y: u16,
-}
 
 const STREAM_NAME: &str = "paint-game";
 
@@ -59,6 +55,7 @@ async fn connect() -> redis::aio::ConnectionManager {
 }
 
 async fn write_to_stream(conn: &mut redis::aio::ConnectionManager, user_id: Uuid, data: String) {
+    // TODO: remove this variable declation?
     let _: String = conn
         .xadd(
             STREAM_NAME,
@@ -94,11 +91,14 @@ async fn read_entire_stream(conn: &mut redis::aio::ConnectionManager) -> StreamR
 async fn main() {
     env_logger::init();
 
+    let users = Users::default();
     let chat = warp::path("game")
+        // add users as a filter
+        .and(warp::any().map(move|| users.clone()))
         // add websocket filter
         .and(warp::ws())
-        .map(|ws: warp::ws::Ws| {
-            ws.on_upgrade(move | socket| user_connected(socket))
+        .map(|users: Users, ws: warp::ws::Ws| {
+            ws.on_upgrade(move | socket| user_connected(users, socket))
         });
 
     let index = warp::path("static")
@@ -110,100 +110,96 @@ async fn main() {
 
 
 async fn initial_dump(conn_manager: &mut ConnectionManager,
-                      mut user_ws_tx: SplitSink<WebSocket, Message>,
-                      user_id: Uuid){
+                      users: &Users,
+                      my_id: Uuid) {
+    /// Read the entire redis stream and send each entry back on the websocket
 
-    debug!("Initial dump for user_id {:?}", user_id);
+    debug!("Initial dump for user_id {:?}", my_id);
 
-    let stream_data = read_entire_stream( conn_manager).await;
+    let stream_data = read_entire_stream(conn_manager).await;
     for StreamKey { key, ids } in stream_data.keys {
         for StreamId { id, map: zz } in ids {
+            // TODO: dont use unwrap
             let r_data: RedisResult<String> = from_redis_value(&zz.get("data").unwrap());
             let data = r_data.unwrap();
-            let r_user_id: RedisResult<String> = from_redis_value(&zz.get("user_id").unwrap());
-            let user_id = r_user_id.unwrap();
 
-            debug!("Initial dump data from user_id {:?} is {:?}", user_id, data);
-
-            user_ws_tx
-                .send(Message::text(data))
-                .unwrap_or_else(|e| {
-                    error!("websocket send error for initial dump: {}", e);
-                })
-                .await;
+            // TODO: understand why i cant do users.read().await.get(user_id)... damn Rust...
+            for (&user_id, tx) in users.read().await.iter() {
+                if my_id.to_u128_le() == user_id{
+                    if let Err(_disconnected) = tx.send(Message::text(&data)) {
+                        // The tx is disconnected, our `user_disconnected` code
+                        // should be happening in another task, nothing more to
+                        // do here.
+                    }
+                    break;
+                }
+            }
         }
     }
 }
 
-async fn user_connected(ws: WebSocket) {
+async fn user_connected(users: Users, ws: WebSocket) {
     /// For every new user
     ///     Create a user_id
-    ///     Send back all data points
-    ///
+    ///     Send back all data points from redis to the user
+    ///     Spawn tokio task to read data from stream and send back on ws connection
 
     let user_id = Uuid::new_v4();
     debug!("New user_id {:?}", user_id);
 
-    let (mut user_ws_tx, mut user_ws_rx) = ws.split();
+    // Use an unbounded channel to handle buffering and flushing of messages to the websocket.
+    // Additionally this is convenient since user_ws_rx (SplitStream<WebSocket>) implements the
+    // drop trait and therefore can never be cloned, so here we can use tx (UnboundedSender<Message>)
+    // to as a reference for each user.
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut rx = UnboundedReceiverStream::new(rx);
 
+    users.write().await.insert(user_id.to_u128_le(), tx);
+
+    // debug!("All users:");
+    // for (&user_id, tx) in users.read().await.iter() {
+    //     debug!("{:?}", &user_id);
+    // }
+
+    let (mut user_ws_tx, mut user_ws_rx) = ws.split();
     let mut conn_manager = connect().await;
 
-    initial_dump(&mut conn_manager, user_ws_tx, user_id).await;
+    tokio::task::spawn(async move {
+        while let Some(message) = rx.next().await {
+            user_ws_tx
+                .send(message)
+                .unwrap_or_else(|e| {
+                    error!("websocket send error: {}", e);
+                })
+                .await;
+        }
+    });
 
+    initial_dump(&mut conn_manager, &users, user_id).await;
 
+    handle_incoming_data(user_ws_rx, &mut conn_manager, &users, user_id).await;
 
-    // let data = read_entire_stream(&mut conn_manager).await;
-    //
+    handle_disconnecting(&users, user_id).await;
 
+}
 
-    // everytime we hear data from redis that is not ours, send back to user_ws_tx
-    // tokio::task::spawn(async move {
-    //     let mut listen_conn_manager = connect().await;
-    //     loop {
-    //         let data = blocking_read_from_stream(&mut listen_conn_manager).await;
-    //
-    //         for StreamKey { key, ids } in data.keys {
-    //             for StreamId { id, map: zz } in ids {
-    //                 let r_x: RedisResult<String> = from_redis_value(&zz.get("x").unwrap());
-    //                 let x = r_x.unwrap();
-    //                 let r_y: RedisResult<String> = from_redis_value(&zz.get("y").unwrap());
-    //                 let y = r_y.unwrap();
-    //                 let r_user_id: RedisResult<String> =
-    //                     from_redis_value(&zz.get("user_id").unwrap());
-    //                 let user_id_from_stream = r_user_id.unwrap();
-    //
-    //                 let yy = user_id_from_stream.parse::<u16>().unwrap();
-    //
-    //                 debug!(
-    //                     "READING FROM STREAM: My user {:?}. Stream user {:?}, x {:?}, y {:?}",
-    //                     my_id, user_id_from_stream, x, y
-    //                 );
-    //
-    //                 // only send back other user's data
-    //                 if yy != my_id as u16 {
-    //                     let response = format!("{{\"x\": {}, \"y\": {}}}", x, y);
-    //                     user_ws_tx
-    //                         .send(Message::text(response))
-    //                         .unwrap_or_else(|e| {
-    //                             error!("websocket send error: {}", e);
-    //                         })
-    //                         .await;
-    //                 }
-    //             }
-    //
-    //             // TODO: do we need to acknowledge each stream and message ID
-    //             //       once all messages are correctly processed
-    //         }
-    //     }
-    // });
+async fn handle_disconnecting(users:  &Users, my_id: Uuid) {
+    /// Code run after a user disconnects their ws connection
+    debug!("Good bye user_id {:?}", my_id);
+    users.write().await.remove(&my_id.to_u128_le());
+}
 
-
-    // everytime we receive data lets append it to our redis stream
+async fn handle_incoming_data(mut user_ws_rx: SplitStream<WebSocket>,
+                              conn_manager: &mut ConnectionManager,
+                              users: &Users,
+                              my_id: Uuid){
+    /// When we receive data from the ws we store it on the redis stream and send it on the
+    /// UnboundedReceiver
     while let Some(result) = user_ws_rx.next().await {
         let message: Message = match result {
             Ok(msg) => msg,
             Err(e) => {
-                // error!("websocket error(uid={}): {}", user_id, e);
+                error!("websocket error from my_id {:?}: {:?}", my_id, e);
                 break;
             }
         };
@@ -213,24 +209,18 @@ async fn user_connected(ws: WebSocket) {
             return;
         };
 
-        debug!("user_id {:?} sent the following data {:?}", user_id, user_data);
+        debug!("my_id {:?} sent the following data {:?}", my_id, user_data);
 
-        write_to_stream(&mut conn_manager, user_id, user_data.to_string()).await;
+        // send the data to all users except the my_id
+        for (&user_id, tx) in users.read().await.iter() {
+            if my_id.to_u128_le() != user_id {
+                if let Err(_disconnected) = tx.send(Message::text(user_data)) {
+                    // The tx is disconnected, our `user_disconnected` code
+                    // should be happening in another task, nothing more to
+                    // do here.
+                }
+            }
+        }
+        write_to_stream(conn_manager, my_id, user_data.to_string()).await;
     }
-
-    // when the user disconnections this code will run
-    debug!("Good bye user_id {:?}", user_id);
-
-    // if the user ever disconnects, the above while let will break, thus executing
-    // this code below
-    // user_disconnected(my_id, &users).await;
-}
-
-
-
-async fn user_disconnected(my_id: usize, users: &Users) {
-    info!("good bye user: {}", my_id);
-
-    // Stream closed up, so remove from the user list
-    users.write().await.remove(&my_id);
 }
