@@ -57,15 +57,13 @@ window.addEventListener("load", () => {
     };
     ws.onmessage = function(msg) {
 
-        if (isDataFromUser){
-            ctx.beginPath();
-            isDataFromUser = false;
-        }
+        debugger;
 
-        let mouseEvent = JSON.parse(msg.data);
-        console.log(`recieved data: {"x": ${mouseEvent.x}, "y":${mouseEvent.y}}`);
+        console.log(`received data: ${msg.data}`);
+        let otherLine = Konva.Node.create(msg.data, 'container');
+        layer.add(otherLine);
 
-        draw(mouseEvent.x, mouseEvent.y)
+        // draw(mouseEvent.x, mouseEvent.y)
 
 
     };
