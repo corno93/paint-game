@@ -1,3 +1,6 @@
+/// Script sends the same line to the url ws://localhost:3030/game
+/// It will send it 50 times with 1 second breaks inbetween.
+
 use std::{thread, time};
 use log::*;
 use url::Url;
@@ -212,7 +215,4 @@ fn main() {
         send_line(line);
         thread::sleep(ten_millis);
     }
-
-
-
 }

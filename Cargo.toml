@@ -22,7 +22,6 @@ uuid = {version = "1.0.0", features = [
 ]}
 tungstenite = {version = "0.17.2"}
 url = { version = "2.2.2" }
-json = {version="0.12.4"}
 
 [[bin]]
 name = "game"

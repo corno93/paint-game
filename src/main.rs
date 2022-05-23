@@ -24,12 +24,9 @@ use warp::Filter;
 use warp::ws::{Message, WebSocket};
 
 
-/// Our state of currently connected users.
-///
-/// - Key is their id
-/// - Value is a sender of `warp::ws::Message`
+/// Threadsafe hashmap which represents all the active users.
+/// Contains an id as key and a mpsc sender that points to the tx of the user's websocket
 type Users = Arc<RwLock<HashMap<u128, mpsc::UnboundedSender<Message>>>>;
-
 
 const STREAM_NAME: &str = "paint-game";
 
@@ -52,8 +49,8 @@ async fn connect() -> redis::aio::ConnectionManager {
         .expect("failed to connect to Redis")
 }
 
+/// Write to the stream (redis cmd: XADD paint-game * user_id <user_id> data <data>)
 async fn write_to_stream(conn: &mut redis::aio::ConnectionManager, user_id: Uuid, data: String) {
-    // TODO: remove this variable declation?
     let _: String = conn
         .xadd(
             STREAM_NAME,
@@ -64,8 +61,7 @@ async fn write_to_stream(conn: &mut redis::aio::ConnectionManager, user_id: Uuid
         .unwrap();
 }
 
-// Here we block the stream and only read new values
-// cmd: XREAD BLOCK 0 STREAMS paint-game $
+/// Block the stream and only read new values (redis cmd: XREAD BLOCK 0 STREAMS paint-game $)
 async fn blocking_read_from_stream(conn: &mut redis::aio::ConnectionManager) -> StreamReadReply {
     let reply: StreamReadReply = conn
         .xread_options(
@@ -78,8 +74,7 @@ async fn blocking_read_from_stream(conn: &mut redis::aio::ConnectionManager) -> 
     reply
 }
 
-// Here we read the entire stream
-// cmd: XREAD STREAMS paint-game 0
+/// Read the entire stream (redis cmd: XREAD STREAMS paint-game 0)
 async fn read_entire_stream(conn: &mut redis::aio::ConnectionManager) -> StreamReadReply {
     let reply: StreamReadReply = conn.xread(&[STREAM_NAME], &[0]).await.unwrap();
     reply
@@ -106,11 +101,10 @@ async fn main() {
 }
 
 
-
+/// Read the entire redis stream and send each entry back on the websocket
 async fn initial_dump(conn_manager: &mut ConnectionManager,
                       users: &Users,
                       my_id: Uuid) {
-    /// Read the entire redis stream and send each entry back on the websocket
 
     debug!("Initial dump for user_id {:?}", my_id);
 
@@ -136,11 +130,14 @@ async fn initial_dump(conn_manager: &mut ConnectionManager,
     }
 }
 
+/// Runs when a user connects and the websocket upgrade is successful.
+/// - create a user_id and an mpsc unbounbed_channel. store these in threadsafe Users
+/// - return all data saved in redis stream to the user
+/// - in tokio task, everytime we recieve data on mpsc unbounbed_channel, send straight back on
+/// websocket
+/// - for all data recieved on the websocket we send it back to all users (except the user its
+/// from) and store on redis stream.
 async fn user_connected(users: Users, ws: WebSocket) {
-    /// For every new user
-    ///     Create a user_id
-    ///     Send back all data points from redis to the user
-    ///     Spawn tokio task to read data from stream and send back on ws connection
 
     let user_id = Uuid::new_v4();
     debug!("New user_id {:?}", user_id);
@@ -162,6 +159,10 @@ async fn user_connected(users: Users, ws: WebSocket) {
     let (mut user_ws_tx, mut user_ws_rx) = ws.split();
     let mut conn_manager = connect().await;
 
+    initial_dump(&mut conn_manager, &users, user_id).await;
+
+    // In a tokio task, loop forever listening to the receiving end of the mpsc unbounded_channel.
+    // When we get data, send back on the user's websocket.
     tokio::task::spawn(async move {
         while let Some(message) = rx.next().await {
             user_ws_tx
@@ -173,26 +174,24 @@ async fn user_connected(users: Users, ws: WebSocket) {
         }
     });
 
-    initial_dump(&mut conn_manager, &users, user_id).await;
-
     handle_incoming_data(user_ws_rx, &mut conn_manager, &users, user_id).await;
 
     handle_disconnecting(&users, user_id).await;
-
 }
 
+/// Code run after a user disconnects their websocket connection
 async fn handle_disconnecting(users:  &Users, my_id: Uuid) {
-    /// Code run after a user disconnects their ws connection
+
     debug!("Good bye user_id {:?}", my_id);
     users.write().await.remove(&my_id.to_u128_le());
 }
 
+/// When we receive data from the websocket we send it back to all users (except the user its
+/// from) and store on redis stream
 async fn handle_incoming_data(mut user_ws_rx: SplitStream<WebSocket>,
                               conn_manager: &mut ConnectionManager,
                               users: &Users,
                               my_id: Uuid){
-    /// When we receive data from the ws we store it on the redis stream and send it on the
-    /// UnboundedReceiver
     while let Some(result) = user_ws_rx.next().await {
         let message: Message = match result {
             Ok(msg) => msg,
