@@ -23,8 +23,6 @@ use uuid::Uuid;
 use warp::Filter;
 use warp::ws::{Message, WebSocket};
 
-/// Our global unique user id counter.
-static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Our state of currently connected users.
 ///

@@ -57,14 +57,9 @@ window.addEventListener("load", () => {
     };
     ws.onmessage = function(msg) {
 
-        debugger;
-
         console.log(`received data: ${msg.data}`);
         let otherLine = Konva.Node.create(msg.data, 'container');
         layer.add(otherLine);
-
-        // draw(mouseEvent.x, mouseEvent.y)
-
 
     };
     ws.onclose = function() {
