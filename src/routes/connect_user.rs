@@ -1,10 +1,5 @@
-use std::collections::HashMap;
 use std::env;
-use std::fmt::Debug;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+
 
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
 use futures_util::stream::{SplitSink, SplitStream};
@@ -14,30 +9,30 @@ use redis::aio;
 use redis::aio::ConnectionManager;
 use redis::RedisResult;
 use redis::streams::{StreamId, StreamKey, StreamReadOptions, StreamReadReply};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 use warp::Filter;
 use warp::ws::{Message, WebSocket};
 use crate::db;
+use crate::db::Db;
 
-/// Threadsafe hashmap which represents all the active users.
-/// Contains an id as key and a mpsc sender that points to the tx of the user's websocket
-type Users = Arc<RwLock<HashMap<u128, mpsc::UnboundedSender<Message>>>>;
+use crate::types::Users;
 
 
 pub fn connect_user_route(
     users: Users,
+    db: db::Db
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
      warp::path("connect_user")
         // add users as a filter
         .and(warp::any().map(move|| users.clone()))
+         // add db as a filter
+        .and(warp::any().map(move|| db.clone()))
         // add websocket filter
         .and(warp::ws())
-        .map(|users: Users, ws: warp::ws::Ws| {
-            ws.on_upgrade(move | socket| connect_user(users, socket))
+        .map(|users: Users, db: Db, ws: warp::ws::Ws| {
+            ws.on_upgrade(move | socket| connect_user(users,db,  socket))
         })
 }
 
@@ -48,7 +43,7 @@ pub fn connect_user_route(
 /// websocket
 /// - for all data recieved on the websocket we send it back to all users (except the user its
 /// from) and store on redis stream.
-pub async fn connect_user(users: Users, ws: WebSocket) {
+pub async fn connect_user(users: Users, mut db: Db, ws: WebSocket) {
 
     let user_id = Uuid::new_v4();
     debug!("New user_id {:?}", user_id);
@@ -68,9 +63,8 @@ pub async fn connect_user(users: Users, ws: WebSocket) {
     // }
 
     let (mut user_ws_tx, mut user_ws_rx) = ws.split();
-    let mut conn_manager = db::connect().await;
 
-    initial_dump(&mut conn_manager, &users, user_id).await;
+    initial_dump(&mut db, &users, user_id).await;
 
     // In a tokio task, loop forever listening to the receiving end of the mpsc unbounded_channel.
     // When we get data, send back on the user's websocket.
@@ -85,20 +79,20 @@ pub async fn connect_user(users: Users, ws: WebSocket) {
         }
     });
 
-    handle_incoming_data(user_ws_rx, &mut conn_manager, &users, user_id).await;
+    handle_incoming_data(user_ws_rx, &mut db, &users, user_id).await;
 
     handle_disconnecting(&users, user_id).await;
 }
 
 
 /// Read the entire redis stream and send each entry back on the websocket
-async fn initial_dump(conn_manager: &mut ConnectionManager,
+async fn initial_dump(db: &mut Db,
                       users: &Users,
                       my_id: Uuid) {
 
     debug!("Initial dump for user_id {:?}", my_id);
 
-    let stream_data = db::read_entire_stream(conn_manager).await;
+    let stream_data = db.read_all().await;
     for StreamKey { key, ids } in stream_data.keys {
         for StreamId { id, map: zz } in ids {
             // TODO: dont use unwrap
@@ -132,7 +126,7 @@ async fn handle_disconnecting(users:  &Users, my_id: Uuid) {
 /// When we receive data from the websocket we send it back to all users (except the user its
 /// from) and store on redis stream
 async fn handle_incoming_data(mut user_ws_rx: SplitStream<WebSocket>,
-                              conn_manager: &mut ConnectionManager,
+                              db: &mut Db,
                               users: &Users,
                               my_id: Uuid){
     while let Some(result) = user_ws_rx.next().await {
@@ -161,6 +155,6 @@ async fn handle_incoming_data(mut user_ws_rx: SplitStream<WebSocket>,
                 }
             }
         }
-        db::write_to_stream(conn_manager, my_id, user_data.to_string()).await;
+        db.write_line(my_id, user_data.to_string()).await;
     }
 }

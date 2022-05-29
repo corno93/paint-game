@@ -1,22 +1,28 @@
-use crate::routes::connect_user::connect_user;
-use crate::routes::{connect_user, index};
+use crate::routes::connect_user::connect_user_route;
+use crate::routes::index::index_route;
 
 mod routes;
 mod db;
 mod types;
 
 use types::Users;
+use db::Db;
+
+// Filter needs to be here. I think Rust is auto inferring the types for connect_user_route,
+// and index_route. Without `use warp::Filter` Rust complains index_route does not have
+// method 'or'.
 use warp::Filter;
-use warp::ws::{Message, WebSocket};
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
     let users = Users::default();
-    let connect_user_route = routes::connect_user::connect_user_route(users);
-    let index_route = routes::index::index_route();
+    let db = Db::init().await;
 
+    let connect_user_route = connect_user_route(users, db);
+    let index_route = index_route();
     let all_routes = index_route.or(connect_user_route);
+
     warp::serve(all_routes).run(([127, 0, 0, 1], 3030)).await;
 }
