@@ -1,12 +1,10 @@
+use log::*;
 /// Script sends the same line to the url ws://localhost:3030/game
 /// It will send it 50 times with 1 second breaks inbetween.
-
 use std::{thread, time};
-use log::*;
 use url::Url;
 
 use tungstenite::{connect, Error, Message, Result};
-
 
 fn send_line(line: &str) -> Result<()> {
     let case_url = Url::parse("ws://localhost:3030/game").unwrap();
@@ -17,7 +15,6 @@ fn send_line(line: &str) -> Result<()> {
 }
 
 fn main() {
-
     // Data is of a konva line.
     // The points field is flattened is x, y consecutive pairs
     let line = r#"

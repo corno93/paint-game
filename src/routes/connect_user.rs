@@ -38,7 +38,7 @@ pub fn connect_user_route(
 
 /// Runs when a user connects and the websocket upgrade is successful.
 /// - create a user_id and an mpsc unbounbed_channel. store these in threadsafe Users
-/// - return all data saved in redis stream to the user
+/// - return all data saved in db to the user
 /// - in tokio task, everytime we recieve data on mpsc unbounbed_channel, send straight back on
 /// websocket
 /// - for all data recieved on the websocket we send it back to all users (except the user its
