@@ -1,12 +1,12 @@
 use crate::routes::connect_user::connect_user_route;
 use crate::routes::index::index_route;
 
-mod routes;
 mod db;
+mod routes;
 mod types;
 
-use types::Users;
 use db::Db;
+use types::Users;
 
 // Filter needs to be here. I think Rust is auto inferring the types for connect_user_route,
 // and index_route. Without `use warp::Filter` Rust complains index_route does not have
