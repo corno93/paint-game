@@ -1,5 +1,4 @@
-use crate::routes::connect_user::connect_user_route;
-use crate::routes::index::index_route;
+use crate::routes::{connect_user::connect_user_route, index::index_route};
 
 mod db;
 mod routes;

@@ -1,4 +1,4 @@
-/// Script sends the same line to the url ws://localhost:3030/game
+/// Script sends the same line to the url ws://localhost:3030/connect_user
 /// It will send it 50 times with 1 second breaks inbetween.
 use std::{thread, time};
 
@@ -6,7 +6,7 @@ use tungstenite::{connect, Message, Result};
 use url::Url;
 
 fn send_line(line: &str) -> Result<()> {
-    let case_url = Url::parse("ws://localhost:3030/game").unwrap();
+    let case_url = Url::parse("ws://localhost:3030/connect_user").unwrap();
     let (mut socket, _) = connect(case_url)?;
 
     socket.write_message(Message::Text(line.into())).unwrap();

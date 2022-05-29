@@ -1,14 +1,11 @@
-use futures_util::{SinkExt, StreamExt, TryFutureExt};
 use futures_util::stream::SplitStream;
-use log::{debug, error};
-use redis::{AsyncCommands, from_redis_value};
-use redis::RedisResult;
-use redis::streams::{StreamId, StreamKey};
+use futures_util::{SinkExt, StreamExt, TryFutureExt};
+use log::{debug, error, info};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
-use warp::Filter;
 use warp::ws::{Message, WebSocket};
+use warp::Filter;
 
 use crate::db;
 use crate::db::Db;
@@ -31,15 +28,15 @@ pub fn connect_user_route(
 }
 
 /// Runs when a user connects and the websocket upgrade is successful.
-/// - create a user_id and an mpsc unbounbed_channel. store these in threadsafe Users
-/// - return all data saved in db to the user
-/// - in tokio task, everytime we receive data on mpsc unbounbed_channel, send straight back on
+/// - create a user_id and an mpsc unbounded_channel. store these in threadsafe Users
+/// - return the game data to the user
+/// - in tokio task, everytime we receive data on mpsc unbounded_channel, send straight back on
 /// websocket
-/// - for all data recieved on the websocket we send it back to all users (except the user its
-/// from) and store on redis stream.
+/// - for all data received on the websocket we send it back to all users (except the user its
+/// from) and store in db.
 pub async fn connect_user(users: Users, mut db: Db, ws: WebSocket) {
     let user_id = Uuid::new_v4();
-    debug!("New user_id {:?}", user_id);
+    info!("New user_id {:?}", user_id);
 
     // Use an unbounded channel to handle buffering and flushing of messages to the websocket.
     // Additionally this is convenient since user_ws_rx (SplitStream<WebSocket>) implements the
@@ -50,14 +47,9 @@ pub async fn connect_user(users: Users, mut db: Db, ws: WebSocket) {
 
     users.write().await.insert(user_id.to_u128_le(), tx);
 
-    // debug!("All users:");
-    // for (&user_id, tx) in users.read().await.iter() {
-    //     debug!("{:?}", &user_id);
-    // }
+    let (mut user_ws_tx, user_ws_rx) = ws.split();
 
-    let (mut user_ws_tx, mut user_ws_rx) = ws.split();
-
-    initial_dump(&mut db, &users, user_id).await;
+    dump_game(&mut db, &users, user_id).await;
 
     // In a tokio task, loop forever listening to the receiving end of the mpsc unbounded_channel.
     // When we get data, send back on the user's websocket.
@@ -77,27 +69,19 @@ pub async fn connect_user(users: Users, mut db: Db, ws: WebSocket) {
     handle_disconnecting(&users, user_id).await;
 }
 
-/// Read the entire redis stream and send each entry back on the websocket
-async fn initial_dump(db: &mut Db, users: &Users, my_id: Uuid) {
-    debug!("Initial dump for user_id {:?}", my_id);
+/// Transfer the entire game to the newly connected user
+async fn dump_game(db: &mut Db, users: &Users, my_id: Uuid) {
+    info!("Initial dump for user_id {:?}", my_id);
 
-    let stream_data = db.read_all().await;
-    for StreamKey { key, ids } in stream_data.keys {
-        for StreamId { id, map: zz } in ids {
-            // TODO: dont use unwrap
-            let r_data: RedisResult<String> = from_redis_value(&zz.get("data").unwrap());
-            let data = r_data.unwrap();
-
-            // TODO: understand why i cant do users.read().await.get(user_id)... damn Rust...
-            for (&user_id, tx) in users.read().await.iter() {
-                if my_id.to_u128_le() == user_id {
-                    if let Err(_disconnected) = tx.send(Message::text(&data)) {
+        match users.read().await.get(&my_id.to_u128_le()) {
+            None => error!("Somehow this new user does not have a mpsc unbounded_channel..."),
+            Some(tx) => {
+                for line in db.read_all_lines().await.iter() {
+                    if let Err(_disconnected) = tx.send(Message::text(line)) {
                         // The tx is disconnected, our `user_disconnected` code
                         // should be happening in another task, nothing more to
                         // do here.
                     }
-                    break;
-                }
             }
         }
     }
@@ -105,12 +89,12 @@ async fn initial_dump(db: &mut Db, users: &Users, my_id: Uuid) {
 
 /// Code run after a user disconnects their websocket connection
 async fn handle_disconnecting(users: &Users, my_id: Uuid) {
-    debug!("Good bye user_id {:?}", my_id);
+    info!("Good bye user_id {:?}", my_id);
     users.write().await.remove(&my_id.to_u128_le());
 }
 
 /// When we receive data from the websocket we send it back to all users (except the user its
-/// from) and store on redis stream
+/// from) and store in the db
 async fn handle_incoming_data(
     mut user_ws_rx: SplitStream<WebSocket>,
     db: &mut Db,
@@ -131,7 +115,7 @@ async fn handle_incoming_data(
             return;
         };
 
-        debug!("my_id {:?} sent the following data {:?}", my_id, user_data);
+        info!("my_id {:?} sent the following data {:?}", my_id, user_data);
 
         // send the data to all users except the my_id
         for (&user_id, tx) in users.read().await.iter() {
