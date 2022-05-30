@@ -37,7 +37,8 @@ window.addEventListener("load", () => {
     function mouseupHandler(){
         isDrawing = false;
         console.log("line: ", lastLine.toJSON());
-        ws.send(`${lastLine.toJSON()}`);
+        let serializedLine = textToBinary(`${lastLine.toJSON()}`);
+        ws.send(serializedLine);
     }
 
     function mousemoveHandler(e) {
@@ -58,7 +59,8 @@ window.addEventListener("load", () => {
     ws.onmessage = function(msg) {
 
         console.log(`received data: ${msg.data}`);
-        let otherLine = Konva.Node.create(msg.data, 'container');
+        let deserializedLine = binaryToText(msg.data);
+        let otherLine = Konva.Node.create(deserializedLine, 'container');
         layer.add(otherLine);
 
     };
