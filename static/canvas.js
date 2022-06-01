@@ -1,6 +1,6 @@
 window.addEventListener("load", () => {
 
-    const uri = 'ws://' + location.host + '/game';
+    const uri = 'ws://' + location.host + '/connect_user';
     const ws = new WebSocket(uri);
 
     var stage = new Konva.Stage({
