@@ -1,6 +1,6 @@
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
-use log::{debug, error, info};
+use log::{error, info};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
@@ -9,7 +9,7 @@ use warp::Filter;
 
 use crate::db;
 use crate::db::Db;
-use crate::types::{Users, Result};
+use crate::types::{Result, Users};
 
 pub fn connect_user_route(
     users: Users,
@@ -78,7 +78,9 @@ async fn dump_game(db: &mut Db, users: &Users, my_id: Uuid) -> Result<()> {
     info!("Initial dump for user_id {:?}", my_id);
 
     let r = users.read().await;
-    let user_tx = r.get(&my_id.to_u128_le()).unwrap_or_else(|| panic!("Missing user {}", my_id));
+    let user_tx = r
+        .get(&my_id.to_u128_le())
+        .unwrap_or_else(|| panic!("Missing user {}", my_id));
 
     for line in db.read_all_lines().await?.iter() {
         user_tx.send(Message::text(line))?;
@@ -127,6 +129,9 @@ async fn handle_incoming_data(
                 }
             }
         }
-        db.write_line(my_id, user_data.to_string()).await;
+
+        if let Err(err) = db.write_line(my_id, user_data.to_string()).await {
+            error!("error writing to db from {:?}: {:?}", my_id, err);
+        }
     }
 }

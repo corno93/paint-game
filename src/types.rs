@@ -4,9 +4,9 @@ use std::fmt;
 use std::result;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, RwLock};
-use tokio::sync::mpsc::error::{SendError, TryRecvError};
 use redis::RedisError;
+use tokio::sync::mpsc::error::{SendError, TryRecvError};
+use tokio::sync::{mpsc, RwLock};
 use warp::ws::Message;
 
 /// Threadsafe hashmap which represents all the active users.
