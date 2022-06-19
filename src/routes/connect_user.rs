@@ -9,7 +9,7 @@ use warp::Filter;
 
 use crate::db;
 use crate::db::Db;
-use crate::types::Users;
+use crate::types::{Users, Result};
 
 pub fn connect_user_route(
     users: Users,
@@ -49,7 +49,11 @@ pub async fn connect_user(users: Users, mut db: Db, ws: WebSocket) {
 
     let (mut user_ws_tx, user_ws_rx) = ws.split();
 
-    dump_game(&mut db, &users, user_id).await;
+    if dump_game(&mut db, &users, user_id).await.is_err() {
+        info!("Initial dump failed for user {} - Disconnecting", user_id);
+        handle_disconnecting(&users, user_id).await;
+        return;
+    }
 
     // In a tokio task, loop forever listening to the receiving end of the mpsc unbounded_channel.
     // When we get data, send back on the user's websocket.
@@ -70,21 +74,17 @@ pub async fn connect_user(users: Users, mut db: Db, ws: WebSocket) {
 }
 
 /// Transfer the entire game to the newly connected user
-async fn dump_game(db: &mut Db, users: &Users, my_id: Uuid) {
+async fn dump_game(db: &mut Db, users: &Users, my_id: Uuid) -> Result<()> {
     info!("Initial dump for user_id {:?}", my_id);
 
-        match users.read().await.get(&my_id.to_u128_le()) {
-            None => error!("Somehow this new user does not have a mpsc unbounded_channel..."),
-            Some(tx) => {
-                for line in db.read_all_lines().await.iter() {
-                    if let Err(_disconnected) = tx.send(Message::text(line)) {
-                        // The tx is disconnected, our `user_disconnected` code
-                        // should be happening in another task, nothing more to
-                        // do here.
-                    }
-            }
-        }
+    let r = users.read().await;
+    let user_tx = r.get(&my_id.to_u128_le()).unwrap_or_else(|| panic!("Missing user {}", my_id));
+
+    for line in db.read_all_lines().await?.iter() {
+        user_tx.send(Message::text(line))?;
     }
+
+    Ok(())
 }
 
 /// Code run after a user disconnects their websocket connection

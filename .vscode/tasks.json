@@ -15,7 +15,9 @@
         "type": "shell",
         "command": "cargo",
         "args": [
-          "run"
+          "run",
+          "--bin",
+          "game"
         ],
         "group": {
           "kind": "build",
