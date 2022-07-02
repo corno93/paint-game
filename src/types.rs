@@ -5,10 +5,10 @@ use std::result;
 use std::sync::Arc;
 
 use redis::RedisError;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::error::{SendError, TryRecvError};
 use tokio::sync::{mpsc, RwLock};
 use warp::ws::Message;
-use serde::{Deserialize, Serialize};
 
 /// Threadsafe hashmap which represents all the active users.
 /// Contains an id as key and a mpsc sender that points to the user's websocket
@@ -51,7 +51,6 @@ impl From<TryRecvError> for Error {
 
 pub type Result<T> = result::Result<T, Error>;
 
-
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct Line {
@@ -65,13 +64,12 @@ struct LineAttrs {
     stroke: String,
     strokeWidth: i16,
     lineCap: String,
-    points: Vec<f32>
+    points: Vec<f32>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn it_works() {
@@ -99,13 +97,17 @@ mod tests {
         assert_eq!(l.attrs.stroke, "/#df4b26");
         assert_eq!(l.attrs.strokeWidth, 5);
         assert_eq!(l.attrs.lineCap, "round");
-        assert_eq!(l.attrs.points, vec![
-            164.00105119637686,
-                    856.3408239439925,
-                    164.00105119637686,
-                    856.3408239439925,
-                    170.00108965478088,
-                    856.3408239439925]);
+        assert_eq!(
+            l.attrs.points,
+            vec![
+                164.00105119637686,
+                856.3408239439925,
+                164.00105119637686,
+                856.3408239439925,
+                170.00108965478088,
+                856.3408239439925
+            ]
+        );
         assert_eq!(l.className, "Line")
     }
 }

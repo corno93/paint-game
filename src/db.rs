@@ -63,18 +63,17 @@ impl Db {
 
         let mut all_data: Vec<String> = Vec::new();
 
-        if !&reply.keys.is_empty(){
+        if !&reply.keys.is_empty() {
             let stream = &reply.keys[0];
 
             for StreamId { id, map } in stream.ids.iter() {
-                let data: String = from_redis_value(
-                    map.get(DATA_ID_KEY)
-                        .unwrap_or_else(|| panic!("Missing `{}` key in stream {}", DATA_ID_KEY, id)),
-                )?;
+                let data: String =
+                    from_redis_value(map.get(DATA_ID_KEY).unwrap_or_else(|| {
+                        panic!("Missing `{}` key in stream {}", DATA_ID_KEY, id)
+                    }))?;
                 all_data.push(data);
             }
         }
-
 
         Ok(all_data)
     }
