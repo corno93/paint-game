@@ -9,7 +9,7 @@ use warp::Filter;
 
 use crate::db;
 use crate::db::Db;
-use crate::types::{Result, Users};
+use crate::types::{Result, Users, Line};
 
 pub fn connect_user_route(
     users: Users,
@@ -107,7 +107,7 @@ async fn handle_incoming_data(
         let message: Message = match result {
             Ok(msg) => msg,
             Err(e) => {
-                error!("websocket error from my_id {:?}: {:?}", my_id, e);
+                error!("websocket error {:?}. Disconnecting user {:?}", e, my_id);
                 break;
             }
         };
@@ -117,6 +117,13 @@ async fn handle_incoming_data(
             return;
         };
 
+        let _: Line = match serde_json::from_str(user_data) {
+            Ok(l) => l,
+            Err(e)=>{
+                error!("Error in serializing line {:?}. Disconnecting user {:?}", e, my_id);
+                break;
+            }
+        };
         info!("my_id {:?} sent the following data {:?}", my_id, user_data);
 
         // send the data to all users except the my_id
