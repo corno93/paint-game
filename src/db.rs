@@ -1,9 +1,11 @@
 use std::env;
 
-use redis::streams::{StreamId, StreamKey, StreamReadReply};
+use redis::streams::{StreamId, StreamReadReply};
 use redis::RedisResult;
 use redis::{from_redis_value, AsyncCommands};
 use uuid::Uuid;
+
+use crate::types::Result;
 
 const STREAM_NAME: &str = "paint-game";
 
@@ -44,36 +46,31 @@ impl Db {
 
     /// Write to the stream
     /// redis cmd: XADD paint-game * user_id <user_id> data <data>
-    pub async fn write_line(&mut self, user_id: Uuid, data: String) {
-        let _: String = self
-            .connection_manager
+    pub async fn write_line(&mut self, user_id: Uuid, data: String) -> RedisResult<String> {
+        self.connection_manager
             .xadd(
                 STREAM_NAME,
                 "*",
                 &[(USER_ID_KEY, user_id.to_string()), (DATA_ID_KEY, data)],
             )
             .await
-            .unwrap();
     }
 
     /// Read the entire stream and serialise data
     /// redis cmd: XREAD STREAMS paint-game 0
-    pub async fn read_all_lines(&mut self) -> Vec<String> {
-        let reply: StreamReadReply = self
-            .connection_manager
-            .xread(&[STREAM_NAME], &[0])
-            .await
-            .unwrap();
+    pub async fn read_all_lines(&mut self) -> Result<Vec<String>> {
+        let reply: StreamReadReply = self.connection_manager.xread(&[STREAM_NAME], &[0]).await?;
 
+        let stream = &reply.keys[0];
         let mut all_data: Vec<String> = Vec::new();
-        for StreamKey { key: _, ids } in reply.keys {
-            for StreamId { id: _, map: zz } in ids {
-                // TODO: dont use unwrap
-                let r_data: RedisResult<String> = from_redis_value(&zz.get(DATA_ID_KEY).unwrap());
-                let data = r_data.unwrap();
-                all_data.push(data)
-            }
+        for StreamId { id, map } in stream.ids.iter() {
+            let data: String = from_redis_value(
+                map.get(DATA_ID_KEY)
+                    .unwrap_or_else(|| panic!("Missing `{}` key in stream {}", DATA_ID_KEY, id)),
+            )?;
+            all_data.push(data);
         }
-        return all_data;
+
+        Ok(all_data)
     }
 }
