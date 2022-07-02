@@ -61,14 +61,18 @@ impl Db {
     pub async fn read_all_lines(&mut self) -> Result<Vec<String>> {
         let reply: StreamReadReply = self.connection_manager.xread(&[STREAM_NAME], &[0]).await?;
 
-        let stream = &reply.keys[0];
         let mut all_data: Vec<String> = Vec::new();
-        for StreamId { id, map } in stream.ids.iter() {
-            let data: String = from_redis_value(
-                map.get(DATA_ID_KEY)
-                    .unwrap_or_else(|| panic!("Missing `{}` key in stream {}", DATA_ID_KEY, id)),
-            )?;
-            all_data.push(data);
+
+        if !&reply.keys.is_empty() {
+            let stream = &reply.keys[0];
+
+            for StreamId { id, map } in stream.ids.iter() {
+                let data: String =
+                    from_redis_value(map.get(DATA_ID_KEY).unwrap_or_else(|| {
+                        panic!("Missing `{}` key in stream {}", DATA_ID_KEY, id)
+                    }))?;
+                all_data.push(data);
+            }
         }
 
         Ok(all_data)

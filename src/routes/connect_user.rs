@@ -9,7 +9,7 @@ use warp::Filter;
 
 use crate::db;
 use crate::db::Db;
-use crate::types::{Result, Users};
+use crate::types::{Line, Result, Users};
 
 pub fn connect_user_route(
     users: Users,
@@ -96,7 +96,9 @@ async fn handle_disconnecting(users: &Users, my_id: Uuid) {
 }
 
 /// When we receive data from the websocket we send it back to all users (except the user its
-/// from) and store in the db
+/// from) and store in the db. If there are errors (from reading the websocket Message or
+/// from serializing the data) break from the while loop which means the handle_disconnecting
+/// will be run.
 async fn handle_incoming_data(
     mut user_ws_rx: SplitStream<WebSocket>,
     db: &mut Db,
@@ -107,7 +109,7 @@ async fn handle_incoming_data(
         let message: Message = match result {
             Ok(msg) => msg,
             Err(e) => {
-                error!("websocket error from my_id {:?}: {:?}", my_id, e);
+                error!("websocket error {:?}. Disconnecting user {:?}", e, my_id);
                 break;
             }
         };
@@ -117,6 +119,16 @@ async fn handle_incoming_data(
             return;
         };
 
+        let _: Line = match serde_json::from_str(user_data) {
+            Ok(l) => l,
+            Err(e) => {
+                error!(
+                    "Error in serializing line {:?}. Disconnecting user {:?}",
+                    e, my_id
+                );
+                break;
+            }
+        };
         info!("my_id {:?} sent the following data {:?}", my_id, user_data);
 
         // send the data to all users except the my_id
